@@ -1,5 +1,8 @@
 from API.REDCap_API import redcapApiConfiguration
-from utils.configuration import *
+from Utils.configuration import *
+from Graphing.line_graphs import *
+from Graphing.variable_info import variable_info
+from Utils.get_record import get_record_data
 import pandas as pd
 from functools import reduce
 
@@ -30,7 +33,8 @@ class REDCapExporter(redcapApiConfiguration):
       'required_field', 'custom_alignment', 'question_number',
       'matrix_group_name', 'matrix_ranking', 'field_annotation'
     ]
-    self.forms_unblinded = {}
+    self.forms_unblinded_wide = {}
+    self.forms_unblinded_long = {}
       
   def export_project_info(self):
     return self.export(self.project_info_request)
@@ -177,7 +181,7 @@ class REDCapExporter(redcapApiConfiguration):
       form.to_excel(f'C:/Users/ndidier/Desktop/REDCap_Data_Management/{folder_name}/{name}.xlsx', index=False)
 
   #for longitudinal projects only
-  def export_form_by_dose(self, form_names=None, event_names=None, timepoint_labels=['t0', 't1', 't2', 't3', 't4', 't5'], active_label='A_', control_label='P_', randomization = {'Placebo_First': 1, 'Alcohol_First': 2}):
+  def export_form_by_dose(self, form_names=None, event_names=None, active_label='A_', control_label='P_', randomization = {'Placebo_First': 1, 'Alcohol_First': 2}):
     
     if event_names is not None:
       form_names = []
@@ -194,7 +198,6 @@ class REDCapExporter(redcapApiConfiguration):
     common_fields_length = len(self.common_fields)
     form_fields = form_data.columns.tolist()
     
-    timepoint_ids = dict(zip(timepoint_labels, [i for i in range(0, len(timepoint_labels))]))
     session_ids = {
       'session_a': 'A',
       'session_b': 'B'
@@ -207,6 +210,8 @@ class REDCapExporter(redcapApiConfiguration):
       'a': [],
       'b': []
     }
+
+    repeated_event_ids = dict(zip(['timepoin_arm_1', 'timepoin_arm_1b', 'timepoin_arm_1c', 'timepoin_arm_1d', 'timepoin_arm_1e'], ['_t0', '_t1', '_t2', '_t3', '_t4', '_t5']))
 
     active_column_names = []
     placebo_column_names = []
@@ -222,22 +227,25 @@ class REDCapExporter(redcapApiConfiguration):
 
     for event in events:
       forms = self.event_forms[event] if event_names is not None else form_names
+      for key, val in repeated_event_ids.items():
+        if key == event[len(event)-len(key):]:
+          timepoint_label = val
+          break
+        else:
+          timepoint_label = ''
       for rando_code in [1, 2]:
         event_data = form_data[(form_data['redcap_event_name']==event) & (form_data['rando_code']==rando_code)]
         is_placebo_session = ((rando_code == randomization['Placebo_First']) and ('session_a' in event)) or ((rando_code == randomization['Alcohol_First']) and ('session_b' in event))
         is_alcohol_session = ((rando_code == randomization['Alcohol_First']) and ('session_a' in event)) or ((rando_code == randomization['Placebo_First']) and ('session_b' in event))
-        print('event:', event)
-        print('rando:', rando_code)
-        print('is alcohol:', is_alcohol_session)
-        print('is alcohol:', is_placebo_session)
         if is_alcohol_session:
           for timepoint, form in enumerate(forms) :
-            field_names = common_field_names + [field for field in self.metadata[self.metadata['form_name']==form]['field_name'].tolist()]
+            field_names = common_field_names + [field for field in self.metadata[self.metadata['form_name']==form]['field_name'].tolist() if field in event_data.columns.tolist()]
+            if len(timepoint_label) > 0:
+              timepoint = timepoint_label[-1]
             timepoint_data = event_data[field_names]
             timepoint_data = timepoint_to_long(timepoint_data, timepoint, active_label)
             long_data = long_data.append(timepoint_data)
-          print('reached Alcohol')
-          active_field_names = [active_label + field for field in form_fields if field not in common_field_names]
+          active_field_names = [active_label + field + timepoint_label for field in form_fields if field not in common_field_names]
           active_column_names.append(active_field_names)
           new_field_names = common_field_names + active_field_names
           event_data.columns = new_field_names
@@ -249,12 +257,13 @@ class REDCapExporter(redcapApiConfiguration):
 
         if is_placebo_session:
           for timepoint, form in enumerate(forms):
-            field_names = common_field_names + [field for field in self.metadata[self.metadata['form_name']==form]['field_name'].tolist()]
+            field_names = common_field_names + [field for field in self.metadata[self.metadata['form_name']==form]['field_name'].tolist() if field in event_data.columns.tolist()]
+            if len(timepoint_label) > 0:
+              timepoint = timepoint_label[-1]
             timepoint_data = event_data[field_names]
             timepoint_data = timepoint_to_long(timepoint_data, timepoint, control_label)
             long_data = long_data.append(timepoint_data)
-          print('reached Placebo')
-          placebo_field_names = [control_label + field for field in form_fields if field not in common_field_names]
+          placebo_field_names = [control_label + field + timepoint_label for field in form_fields if field not in common_field_names]
           placebo_column_names.append(placebo_field_names)
           new_field_names = common_field_names + placebo_field_names
           event_data.columns = new_field_names
@@ -280,16 +289,46 @@ class REDCapExporter(redcapApiConfiguration):
         to_keep = final.iloc[:, :common_fields_length]
         to_keep.columns = common_field_names
         #common_fields = final.iloc[:,common_fields_length+1:]
-        
         final.drop(cols_to_remove, axis=1, inplace=True)
-        form_cols = final.columns.tolist()
+        form_cols = [col for col in final.columns.tolist() if sum(substring in col for substring in ['t0', 't1', 't2', 't3', 't4', 't5']) < 2]
         final = pd.concat([final, to_keep], axis=1)
         final = final[common_field_names + form_cols]
+        final.dropna(how='all', axis=1, inplace=True, thresh=None)
+        # empty_cols = [col for col in final.columns.tolist() if all(x=='' for x in final[col].tolist())]
+        # final.drop(empty_cols, axis=1, inplace=True)
+        if 'A_t1_start_time_t0' in final.columns.tolist():
+          print(final['A_t0_end_time_t2'].value_counts())
+          print(final['A_t0_end_time_t2'].describe())
         final.sort_values(by='subid', inplace=True)
         return final, long_data
     else:
         print('not equal columns')
 
+  def export_all_unblinded_forms(self, path):
+    for form in self.forms:
+      try:
+        form_wide, form_long = self.export_form_by_dose([form])
+        self.forms_unblinded_wide[form] = form_wide
+        self.forms_unblinded_long[form] = form_long
+        form_wide.to_excel(f'{path}/Wide/{form}_unblinded_wide.xlsx', index=False)
+        form_long.to_excel(f'{path}/Long/{form}_unblinded_long.xlsx', index=False)
+      except:
+        print(f'no unblinded export for {form}')
+
+  def export_all_unblinded_events(self, path):
+    events = self.event_forms.keys()
+    repeated_events = ['arrival', 'data_ent', 'presessi', 'timepoin']
+    event_combinations = {}
+    for repeated_event in repeated_events:
+      event_combinations[repeated_event] = [event for event in events if repeated_event in event]
+
+    for repeated_event_name, events in event_combinations.items():
+      form_wide, form_long = self.export_form_by_dose(event_names=events)
+      self.forms_unblinded_wide[repeated_event_name] = form_wide
+      self.forms_unblinded_long[repeated_event_name] = form_long
+      form_wide.to_excel(f'{path}/Wide/{repeated_event_name}_unblinded_wide.xlsx', index=False)
+      form_long.to_excel(f'{path}/Long/{repeated_event_name}_unblinded_long.xlsx', index=False)
+      print(f'SUCCESS {repeated_event_name}')
 
   def export_bp(self):
     data, long_data = self.export_form_by_dose(event_names=['session_a_data_ent_arm_1', 'session_b_data_ent_arm_1'])
@@ -298,7 +337,36 @@ class REDCapExporter(redcapApiConfiguration):
     cols_to_drop = [col for col in long_data.columns if ('peg' in col) or ('dsst' in col)]
     long_data.drop(cols_to_drop, axis=1, inplace=True)
     data.drop('redcap_event_name', axis=1, inplace=True)
-    self.forms_unblinded['BP_wide'] = data
+    self.forms_unblinded_wide['BP'] = data
     data.to_excel('C:/Users/ndidier/Desktop/REDCap_Data_Management/CSDP_C4/Sessions/Unblinded/bp_unblinded_wide.xlsx', index=False)
     long_data.to_excel('C:/Users/ndidier/Desktop/REDCap_Data_Management/CSDP_C4/Sessions/Unblinded/bp_unblinded_long.xlsx', index=False)
+  
+  def create_single_record_graphs(self, subids, dataframe, variable_title, path):
+    print(type(subids))
+    if not isinstance(subids, list):
+      try:
+        subids = [subids]
+      except:
+        print('Error: Invalid Record Type. Must be List.')
+    print(subids)
+    match = variable_info[variable_title]['match']
+    print(match)
+    timepoints = variable_info[variable_title]['timepoints']
+    y_ticks = variable_info[variable_title]['yticks']
+    title = variable_info[variable_title]['title']
+    ylabel = variable_info[variable_title]['ylabel']
+    data = {'A': [], 'P': []}
+    record = get_record_data(subids, dataframe, match, self.common_fields)
+    for dose in ['A', 'P']:
+      dose_record = record[[col for col in record.columns if (dose + '_') in col]]
+      print(dose_record)
+      data_list = dose_record.T.iloc[:,0].tolist()
+      print(data_list)
+      if variable_info[variable_title]['is_int']:
+        data_list = [int(datum) for datum in data_list]
+      data[dose] = data_list
+    for subid in subids:
+      create_line_graph_alcohol(subid, match, title, alc_data=data['A'], timepoints=timepoints, yticks=y_ticks, ylabel=ylabel, path=path)
+      create_line_graph_alcohol_and_placebo(subid, match, title, alc_data=data['A'], pla_data=data['P'], timepoints=timepoints, yticks=y_ticks, ylabel=ylabel, path=path)
+  
   

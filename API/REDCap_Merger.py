@@ -1,5 +1,5 @@
 import pandas as pd
-from utils.configuration import *
+from Utils.configuration import *
 from API.REDCap_Exporter import REDCapExporter
 
 class RedcapMerger:
