@@ -1,2 +1,7 @@
 run.py
 exports/*
+API/REDCap_Merger.py
+Stats/_pycache_/*
+Utils/_pycache_/*
+Graphing/_pycache_/*
+API/_pycache_/*

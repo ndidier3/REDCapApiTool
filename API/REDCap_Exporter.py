@@ -3,13 +3,16 @@ from Utils.configuration import *
 from Graphing.line_graphs import *
 from Graphing.variable_info import variable_info
 from Utils.get_record import get_record_data
+from Utils.reports import *
+from Utils.arrival import *
 import pandas as pd
 from functools import reduce
 
 class REDCapExporter(redcapApiConfiguration):
-  def __init__(self, token, common_fields=[]):
+  def __init__(self, token, common_fields=[], revise_checkbox_metadata = True):
     super().__init__(token)
-    self.cohort = None
+    self.group_field_name = 'group'
+    self.revise_checkbox_metadata = revise_checkbox_metadata
     self.project_info = self.export_project_info()
     self.is_longitudinal = self.project_info['is_longitudinal']
     self.common_fields = common_fields
@@ -68,8 +71,14 @@ class REDCapExporter(redcapApiConfiguration):
     return df
 
   def export_metadata(self):
-    return self.get_response_as_dataframe(self.metadata_request)
-      
+    metadata = self.get_response_as_dataframe(self.metadata_request)
+    for col in metadata.columns.tolist():
+      metadata[col] = clean_meta_text(metadata[col])
+    if self.revise_checkbox_metadata:
+      metadata = revise_checkbox_metadata(metadata)
+    metadata = assign_numeric_data_types(metadata, self.all_raw_data, self.common_fields)
+    return metadata
+
   def export_event_form_mappings(self):
     if self.is_longitudinal:
       event_mappings = self.get_response_as_dataframe(self.events_request)
@@ -80,6 +89,7 @@ class REDCapExporter(redcapApiConfiguration):
       return event_forms
     else:
       return None
+
   def export_arms(self):
     return self.export(self.arms_request)
 
@@ -164,21 +174,24 @@ class REDCapExporter(redcapApiConfiguration):
         data_all_forms[form] = form_data
     return data_all_forms
   
-  def export_form_metadata(self, form):
-    fields = form.columns.tolist()
-    form_metadata = self.metadata[self.metadata['field_name'].isin(fields)]
-    return form_metadata
-  
   def export_all_form_metadata(self, data_all_forms):
     metadata_all_forms = {}
     for form_name, form_data in data_all_forms.items():
-        form_metadata = self.export_form_metadata(form_data)
-        metadata_all_forms[form_name] = form_metadata
+      fields = form_data.columns.tolist()
+      form_metadata = self.metadata[self.metadata['field_name'].isin(fields)]
+      form_metadata = assign_numeric_data_types(form_metadata, form_data, self.common_fields)
+      metadata_all_forms[form_name] = form_metadata
     return metadata_all_forms
-
-  def export_to_excel(self, folder_name):
-    for name, form in self.all_forms.items():
-      form.to_excel(f'C:/Users/ndidier/Desktop/REDCap_Data_Management/{folder_name}/{name}.xlsx', index=False)
+  
+  def export_forms_to_excel(self, directory):
+    for name, form_name in self.forms.items():
+      form_data = self.all_forms[form_name]
+      form_metadata = self.all_forms_metadata[form_name]
+      writer = pd.ExcelWriter(f'{directory}/{name}.xlsx')
+      form_data.to_excel(writer, sheet_name='data', index=False)
+      form_metadata.to_excel(writer, sheet_name='key', index=False)
+      standard_report_to_excel(writer, form_metadata, form_data, self.project_info['project_title'], self.group_field_name)
+    writer.save()
 
   #for longitudinal projects only
   def export_form_by_dose(self, form_names=None, event_names=None, active_label='A_', control_label='P_', randomization = {'Placebo_First': 1, 'Alcohol_First': 2}):
